@@ -10,6 +10,7 @@ import json
 import time
 import asyncio
 import gspread
+import os
 from google.oauth2.service_account import Credentials
 from datetime import datetime
 from selenium import webdriver
@@ -32,31 +33,46 @@ user_settings = {}
 
 class GoogleSheetLogger:
     def __init__(self, credentials_file, sheet_name):
+        self.client = None
+        self.sheet = None
         try:
             scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
             creds = Credentials.from_service_account_file(credentials_file, scopes=scopes)
             self.client = gspread.authorize(creds)
             self.sheet = self.client.open(sheet_name).sheet1
             self.ensure_header()
+            logger.info(f"Google Sheets '{sheet_name}'에 성공적으로 연결되었습니다.")
         except Exception as e:
-            logger.error(f"Google Sheets 연결 실패: {e}")
+            logger.error(f"Google Sheets 연결 실패: {e}. 로그는 파일로 기록됩니다.")
             self.client = None
 
     def ensure_header(self):
-        if self.client and self.sheet.cell(1, 1).value != "Timestamp":구글시트에 작성된게 없어.  어떤부분이 문제일까?
-        GOOGLE_SHEET_NAME, GOOGLE_CREDENTIALS_JSON  2개 모두 github secret variable에 추가했어
-        
+        if self.client and self.sheet.cell(1, 1).value != "Timestamp":
             header = ["Timestamp", "User ID", "Username", "Request", "Response", "Elapsed Time (s)"]
             self.sheet.insert_row(header, 1)
 
+    def log_to_file(self, row):
+        try:
+            log_dir = "logs"
+            if not os.path.exists(log_dir):
+                os.makedirs(log_dir)
+            with open(os.path.join(log_dir, "failed_sheet_logs.txt"), "a", encoding="utf-8") as f:
+                f.write(json.dumps(row) + "\n")
+        except Exception as file_e:
+            logger.error(f"파일 로그 기록 실패: {file_e}")
+
     def log(self, user_id, username, request, response, elapsed_time):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        row_data = [timestamp, str(user_id), username, request, response, f"{elapsed_time:.2f}"]
+        
         if self.client:
             try:
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                row = [timestamp, str(user_id), username, request, response, f"{elapsed_time:.2f}"]
-                self.sheet.append_row(row)
+                self.sheet.append_row(row_data)
             except Exception as e:
-                logger.error(f"Google Sheets 로깅 실패: {e}")
+                logger.error(f"Google Sheets 로깅 실패: {e}. 파일에 기록합니다.")
+                self.log_to_file(row_data)
+        else:
+            self.log_to_file(row_data)
 
 class GeminiNewsScraper:
     def __init__(self):
