@@ -33,7 +33,7 @@ user_settings = {}
 class GoogleSheetLogger:
     def __init__(self, credentials_file, sheet_name):
         try:
-            scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+            scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
             creds = Credentials.from_service_account_file(credentials_file, scopes=scopes)
             self.client = gspread.authorize(creds)
             self.sheet = self.client.open(sheet_name).sheet1
@@ -43,7 +43,9 @@ class GoogleSheetLogger:
             self.client = None
 
     def ensure_header(self):
-        if self.client and self.sheet.cell(1, 1).value != "Timestamp":
+        if self.client and self.sheet.cell(1, 1).value != "Timestamp":구글시트에 작성된게 없어.  어떤부분이 문제일까?
+        GOOGLE_SHEET_NAME, GOOGLE_CREDENTIALS_JSON  2개 모두 github secret variable에 추가했어
+        
             header = ["Timestamp", "User ID", "Username", "Request", "Response", "Elapsed Time (s)"]
             self.sheet.insert_row(header, 1)
 

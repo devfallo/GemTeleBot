@@ -1,0 +1,15 @@
+# Environments
+.env
+venv/
+
+# Credentials
+google_credentials.json
+token.json
+
+# Python
+__pycache__/
+*.pyc
+
+# Log files and data
+*.log
+*.json
