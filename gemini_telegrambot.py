@@ -259,7 +259,16 @@ class TelegramNewsBot:
         """사용자 설정 가져오기 (없으면 기본값)"""
         return user_settings.get(user_id, {'lang': 'ko', 'region': 'KR'})
 
-    def format_response_to_markdown(self, response_data):
+    def get_disclaimer(self, lang='ko'):
+        """언어 설정에 맞는 주의 문구 반환"""
+        disclaimers = {
+            'ko': "\n\n---\n*Gemini는 실수를 할 수 있으니, 내용을 다시 한번 확인해 주세요.*",
+            'en': "\n\n---\n*Gemini can make mistakes, so please double-check the information.*",
+            'ja': "\n\n---\n*Geminiは間違いを犯す可能性がありますので、情報を再確認してください。*",
+        }
+        return disclaimers.get(lang, disclaimers['en']) # 기본값은 영어
+
+    def format_response_to_markdown(self, response_data, lang='ko'):
         """응답 데이터를 Markdown 형태로 포맷팅"""
         if not response_data or 'response' not in response_data:
             return "❌ 응답 데이터를 가져올 수 없습니다."
@@ -268,7 +277,7 @@ class TelegramNewsBot:
         timestamp = response_data['timestamp']
         prompt = response_data['prompt']
         
-        is_news = "뉴스" in prompt
+        is_news = "뉴스" in prompt or "news" in prompt.lower()
         icon = "📰" if is_news else "🤖"
         title = "오늘의 주요 뉴스" if is_news else "Gemini AI 응답"
         
@@ -283,18 +292,21 @@ class TelegramNewsBot:
             line = line.strip()
             if not line:
                 continue
-            if any(keyword in line for keyword in ['정치', '경제', '사회', '국제', '재난', '안전']):
+            if any(keyword in line for keyword in ['정치', '경제', '사회', '국제', '재난', '안전', 'Politics', 'Economy', 'Social']):
                 if ':' in line and len(line) < 50:
                     formatted_lines.append(f"\n**{line}**")
                 else:
                     formatted_lines.append(line)
-            elif line in ['오늘의 주요 뉴스 알려줘', 'Gemini는', '새 창에서 열기']:
+            elif line in ['오늘의 주요 뉴스 알려줘', 'Gemini는', '새 창에서 열기', 'Open in new window']:
                 continue
             else:
                 formatted_lines.append(line)
         
         markdown += '\n'.join(formatted_lines)
         
+        # 주의 문구 추가
+        markdown += self.get_disclaimer(lang)
+
         if len(markdown) > 4000:
             markdown = markdown[:3950] + "\n\n... (내용이 길어 일부 생략됨)"
             
@@ -375,7 +387,7 @@ class TelegramNewsBot:
             filename, news_data = scraper.run(prompt, lang, region)
             
             if news_data:
-                markdown_response = self.format_response_to_markdown(news_data)
+                markdown_response = self.format_response_to_markdown(news_data, lang)
                 response_text = markdown_response
                 await loading_msg.delete()
                 try:
@@ -427,7 +439,7 @@ class TelegramNewsBot:
             filename, response_data = scraper.run(user_prompt, lang, region)
             
             if response_data:
-                markdown_response = self.format_response_to_markdown(response_data)
+                markdown_response = self.format_response_to_markdown(response_data, lang)
                 response_text = markdown_response
                 await loading_msg.delete()
                 try:
