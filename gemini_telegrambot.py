@@ -3,11 +3,14 @@
 Gemini 뉴스 스크래퍼 - Telegram Bot 연동 버전
 - Telegram 메시지를 받으면 Gemini에서 뉴스를 가져와서 응답
 - JSON 파일로 저장 후 Markdown 형태로 텔레그램 전송
+- Google Sheets에 로그 기록
 """
 
 import json
 import time
 import asyncio
+import gspread
+from google.oauth2.service_account import Credentials
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -23,6 +26,35 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# 사용자별 언어/지역 설정을 저장할 딕셔너리
+user_settings = {}
+
+class GoogleSheetLogger:
+    def __init__(self, credentials_file, sheet_name):
+        try:
+            scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+            creds = Credentials.from_service_account_file(credentials_file, scopes=scopes)
+            self.client = gspread.authorize(creds)
+            self.sheet = self.client.open(sheet_name).sheet1
+            self.ensure_header()
+        except Exception as e:
+            logger.error(f"Google Sheets 연결 실패: {e}")
+            self.client = None
+
+    def ensure_header(self):
+        if self.client and self.sheet.cell(1, 1).value != "Timestamp":
+            header = ["Timestamp", "User ID", "Username", "Request", "Response", "Elapsed Time (s)"]
+            self.sheet.insert_row(header, 1)
+
+    def log(self, user_id, username, request, response, elapsed_time):
+        if self.client:
+            try:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                row = [timestamp, str(user_id), username, request, response, f"{elapsed_time:.2f}"]
+                self.sheet.append_row(row)
+            except Exception as e:
+                logger.error(f"Google Sheets 로깅 실패: {e}")
 
 class GeminiNewsScraper:
     def __init__(self):
@@ -40,11 +72,11 @@ class GeminiNewsScraper:
         self.driver = webdriver.Chrome(options=chrome_options)
         self.wait = WebDriverWait(self.driver, 30)
         
-    def access_gemini(self):
-        """Gemini 웹사이트 접속"""
+    def access_gemini(self, lang='ko', region='KR'):
+        """Gemini 웹사이트 접속 (언어 및 지역 설정 포함)"""
         try:
-            logger.info("Gemini 웹사이트에 접속 중...")
-            self.driver.get("https://gemini.google.com/")
+            logger.info(f"Gemini 웹사이트에 접속 중... (언어: {lang}, 지역: {region})")
+            self.driver.get(f"https://gemini.google.com/?lang={lang}&region={region}")
             time.sleep(5)
             logger.info("페이지 로딩 완료")
             
@@ -140,9 +172,8 @@ class GeminiNewsScraper:
             
     def save_to_json(self, response_text, prompt="오늘의 주요 뉴스 알려줘", filename=None):
         """응답을 JSON 파일로 저장"""
-        if filename is None:
+        if filename === None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            # 뉴스가 아닌 경우 gemini_response로 파일명 변경
             prefix = "gemini_news" if "뉴스" in prompt else "gemini_response"
             filename = f"{prefix}_{timestamp}.json"
             
@@ -162,18 +193,14 @@ class GeminiNewsScraper:
             logger.error(f"JSON 파일 저장 중 오류: {e}")
             raise
             
-    def run(self, custom_prompt="오늘의 주요 뉴스 알려줘"):
+    def run(self, custom_prompt="오늘의 주요 뉴스 알려줘", lang='ko', region='KR'):
         """메인 실행 함수"""
         try:
             logger.info("=== Gemini 스크래퍼 시작 ===")
             
-            # 드라이버 설정
             self.setup_driver()
+            self.access_gemini(lang, region)
             
-            # 웹사이트 접속
-            self.access_gemini()
-            
-            # 프롬프트 입력
             logger.info(f"프롬프트 입력 중: {custom_prompt}")
             textarea = self.find_textarea()
             if not textarea:
@@ -185,13 +212,11 @@ class GeminiNewsScraper:
             self.send_message(textarea)
             
             logger.info("응답을 기다리는 중...")
-            time.sleep(30)  # 응답 대기
+            time.sleep(30)
             
-            # 응답 텍스트 가져오기
             response_text = self.get_response_text()
             
             if response_text:
-                # JSON 파일로 저장
                 filename, data = self.save_to_json(response_text, custom_prompt)
                 logger.info("=== 작업 완료 ===")
                 return filename, data
@@ -207,10 +232,15 @@ class GeminiNewsScraper:
                 self.driver.quit()
 
 class TelegramNewsBot:
-    def __init__(self, token):
+    def __init__(self, token, sheet_logger):
         self.token = token
         self.application = None
+        self.sheet_logger = sheet_logger
         
+    def get_user_settings(self, user_id):
+        """사용자 설정 가져오기 (없으면 기본값)"""
+        return user_settings.get(user_id, {'lang': 'ko', 'region': 'KR'})
+
     def format_response_to_markdown(self, response_data):
         """응답 데이터를 Markdown 형태로 포맷팅"""
         if not response_data or 'response' not in response_data:
@@ -220,17 +250,14 @@ class TelegramNewsBot:
         timestamp = response_data['timestamp']
         prompt = response_data['prompt']
         
-        # 뉴스인지 일반 질문인지 구분
         is_news = "뉴스" in prompt
         icon = "📰" if is_news else "🤖"
         title = "오늘의 주요 뉴스" if is_news else "Gemini AI 응답"
         
-        # 기본 헤더
         markdown = f"{icon} **{title}**\n"
         markdown += f"❓ *질문: {prompt}*\n"
         markdown += f"🕐 {datetime.fromisoformat(timestamp).strftime('%Y-%m-%d %H:%M')}\n\n"
         
-        # 응답 텍스트 처리
         lines = response.split('\n')
         formatted_lines = []
         
@@ -238,24 +265,18 @@ class TelegramNewsBot:
             line = line.strip()
             if not line:
                 continue
-                
-            # 카테고리 헤더 처리
             if any(keyword in line for keyword in ['정치', '경제', '사회', '국제', '재난', '안전']):
                 if ':' in line and len(line) < 50:
                     formatted_lines.append(f"\n**{line}**")
                 else:
                     formatted_lines.append(line)
-            # 불필요한 라인 제거
             elif line in ['오늘의 주요 뉴스 알려줘', 'Gemini는', '새 창에서 열기']:
                 continue
-            # 일반 텍스트
             else:
                 formatted_lines.append(line)
         
-        # 최종 마크다운 생성
         markdown += '\n'.join(formatted_lines)
         
-        # 텔레그램 메시지 길이 제한 (4096자)
         if len(markdown) > 4000:
             markdown = markdown[:3950] + "\n\n... (내용이 길어 일부 생략됨)"
             
@@ -263,179 +284,194 @@ class TelegramNewsBot:
         
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """시작 명령어 처리"""
-        welcome_msg = """
+        user_id = update.message.from_user.id
+        settings = self.get_user_settings(user_id)
+        
+        welcome_msg = f"""
 🤖 **Gemini AI 봇에 오신 것을 환영합니다!**
 
 📰 이 봇은 Gemini AI를 통해 다양한 질문에 답변을 드립니다.
 
+**현재 설정:**
+- 언어: `{settings['lang']}`
+- 지역: `{settings['region']}`
+
 **사용 방법:**
 • `/news` - 오늘의 뉴스 가져오기
 • `/msg [질문]` - 원하는 질문을 Gemini에게 물어보기
+• `/setting [항목] [값]` - 언어/지역 설정 변경
 • `/start` - 도움말 보기
 
-**사용 예시:**
-• `/msg 파이썬으로 웹 크롤링하는 방법 알려줘`
-• `/msg 오늘 날씨는 어때?`
-• `/msg AI에 대해 설명해줘`
+**설정 예시:**
+• `/setting lang en` (언어를 영어로 변경)
+• `/setting region US` (지역을 미국으로 변경)
 
 응답을 받는데 약 30-60초가 소요됩니다. 잠시만 기다려주세요! 🙏
         """
         await update.message.reply_text(welcome_msg, parse_mode=ParseMode.MARKDOWN)
+
+    async def setting_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """언어/지역 설정 명령어 처리"""
+        user_id = update.message.from_user.id
+        args = context.args
         
+        if len(args) != 2:
+            await update.message.reply_text(
+                "**잘못된 사용법입니다.**\n"
+                "예시: `/setting lang ko` 또는 `/setting region KR`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+
+        setting_type, value = args[0].lower(), args[1].upper()
+        
+        if user_id not in user_settings:
+            user_settings[user_id] = {'lang': 'ko', 'region': 'KR'}
+            
+        if setting_type == 'lang':
+            user_settings[user_id]['lang'] = value.lower()
+            await update.message.reply_text(f"✅ 언어가 `{value.lower()}`로 설정되었습니다.")
+        elif setting_type == 'region':
+            user_settings[user_id]['region'] = value
+            await update.message.reply_text(f"✅ 지역이 `{value}`로 설정되었습니다.")
+        else:
+            await update.message.reply_text("❌ 잘못된 설정 항목입니다. `lang` 또는 `region`을 사용하세요.")
+
     async def news_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """뉴스 명령어 처리"""
-        # 로딩 메시지 전송
+        start_time = time.time()
+        user = update.message.from_user
+        user_id = user.id
+        settings = self.get_user_settings(user_id)
+        lang, region = settings['lang'], settings['region']
+        prompt = f"오늘의 {region} 주요 뉴스 알려줘"
+
         loading_msg = await update.message.reply_text(
-            "📰 뉴스를 가져오는 중입니다...\n⏰ 약 30-60초 소요됩니다. 잠시만 기다려주세요!"
+            f"📰 뉴스를 가져오는 중입니다... (언어: {lang}, 지역: {region})\n"
+            "⏰ 약 30-60초 소요됩니다. 잠시만 기다려주세요!"
         )
         
+        response_text = ""
         try:
-            # 스크래퍼 실행
             scraper = GeminiNewsScraper()
-            filename, news_data = scraper.run("오늘의 주요 뉴스 알려줘")
+            filename, news_data = scraper.run(prompt, lang, region)
             
             if news_data:
-                # Markdown 형태로 포맷팅
                 markdown_response = self.format_response_to_markdown(news_data)
-                
-                # 로딩 메시지 삭제
+                response_text = markdown_response
                 await loading_msg.delete()
-                
-                # 뉴스 전송 (Markdown 파싱 오류 방지)
                 try:
-                    await update.message.reply_text(
-                        markdown_response, 
-                        parse_mode=ParseMode.MARKDOWN
-                    )
+                    await update.message.reply_text(markdown_response, parse_mode=ParseMode.MARKDOWN)
                 except Exception as markdown_error:
                     logger.warning(f"Markdown 파싱 오류, 일반 텍스트로 전송: {markdown_error}")
-                    # Markdown 태그 제거하고 일반 텍스트로 전송
                     plain_text = markdown_response.replace("**", "").replace("*", "").replace("_", "")
+                    response_text = plain_text
                     await update.message.reply_text(plain_text)
-                
-                # 파일 정보 로그
                 logger.info(f"뉴스 전송 완료. 파일: {filename}")
-                
             else:
-                await loading_msg.edit_text("❌ 뉴스를 가져오는데 실패했습니다. 잠시 후 다시 시도해주세요.")
+                response_text = "❌ 뉴스를 가져오는데 실패했습니다."
+                await loading_msg.edit_text(response_text)
                 
         except Exception as e:
             logger.error(f"뉴스 명령어 처리 중 오류: {e}")
-            try:
-                await loading_msg.edit_text("❌ 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
-            except:
-                # 메시지 편집 실패 시 새 메시지 전송
-                await update.message.reply_text("❌ 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
+            response_text = "❌ 오류가 발생했습니다."
+            await loading_msg.edit_text(response_text)
+        finally:
+            elapsed_time = time.time() - start_time
+            self.sheet_logger.log(user_id, user.username, prompt, response_text, elapsed_time)
             
     async def msg_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """사용자 정의 메시지 명령어 처리"""
-        # 명령어에서 질문 부분 추출
-        user_prompt = ' '.join(context.args)
+        start_time = time.time()
+        user = update.message.from_user
+        user_id = user.id
+        settings = self.get_user_settings(user_id)
+        lang, region = settings['lang'], settings['region']
         
+        user_prompt = ' '.join(context.args)
         if not user_prompt.strip():
-            help_msg = """
-❓ **사용법:** `/msg [질문]`
-
-**예시:**
-• `/msg 파이썬으로 웹 크롤링하는 방법 알려줘`
-• `/msg 오늘 날씨는 어때?`
-• `/msg AI에 대해 설명해줘`
-            """
-            await update.message.reply_text(help_msg, parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(
+                "❓ **사용법:** `/msg [질문]`\n"
+                "예시: `/msg 파이썬으로 웹 크롤링하는 방법 알려줘`",
+                parse_mode=ParseMode.MARKDOWN
+            )
             return
         
-        # 로딩 메시지 전송
         loading_msg = await update.message.reply_text(
-            f"🤖 질문을 처리하는 중입니다...\n❓ *{user_prompt}*\n⏰ 약 30-60초 소요됩니다. 잠시만 기다려주세요!"
+            f"🤖 질문을 처리하는 중입니다...\n❓ *{user_prompt}*\n"
+            f"(언어: {lang}, 지역: {region})\n"
+            "⏰ 약 30-60초 소요됩니다."
         )
         
+        response_text = ""
         try:
-            # 스크래퍼 실행
             scraper = GeminiNewsScraper()
-            filename, response_data = scraper.run(user_prompt)
+            filename, response_data = scraper.run(user_prompt, lang, region)
             
             if response_data:
-                # Markdown 형태로 포맷팅
                 markdown_response = self.format_response_to_markdown(response_data)
-                
-                # 로딩 메시지 삭제
+                response_text = markdown_response
                 await loading_msg.delete()
-                
-                # 응답 전송 (Markdown 파싱 오류 방지)
                 try:
-                    await update.message.reply_text(
-                        markdown_response, 
-                        parse_mode=ParseMode.MARKDOWN
-                    )
+                    await update.message.reply_text(markdown_response, parse_mode=ParseMode.MARKDOWN)
                 except Exception as markdown_error:
                     logger.warning(f"Markdown 파싱 오류, 일반 텍스트로 전송: {markdown_error}")
-                    # Markdown 태그 제거하고 일반 텍스트로 전송
                     plain_text = markdown_response.replace("**", "").replace("*", "").replace("_", "")
+                    response_text = plain_text
                     await update.message.reply_text(plain_text)
-                
-                # 파일 정보 로그
                 logger.info(f"사용자 질문 응답 완료. 파일: {filename}")
-                
             else:
-                await loading_msg.edit_text("❌ 응답을 가져오는데 실패했습니다. 잠시 후 다시 시도해주세요.")
+                response_text = "❌ 응답을 가져오는데 실패했습니다."
+                await loading_msg.edit_text(response_text)
                 
         except Exception as e:
             logger.error(f"사용자 질문 처리 중 오류: {e}")
-            try:
-                await loading_msg.edit_text("❌ 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
-            except:
-                # 메시지 편집 실패 시 새 메시지 전송
-                await update.message.reply_text("❌ 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
+            response_text = "❌ 오류가 발생했습니다."
+            await loading_msg.edit_text(response_text)
+        finally:
+            elapsed_time = time.time() - start_time
+            self.sheet_logger.log(user_id, user.username, user_prompt, response_text, elapsed_time)
             
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """일반 메시지 처리"""
         message_text = update.message.text.lower()
         
-        # 뉴스 관련 키워드 감지
         if any(keyword in message_text for keyword in ['뉴스', 'news', '오늘', '오늘의']):
             await self.news_command(update, context)
         else:
-            help_msg = """
-📝 **사용 가능한 명령어:**
-
-• `/news` - 오늘의 뉴스 가져오기
-• `/msg [질문]` - 원하는 질문을 Gemini에게 물어보기
-• `/start` - 도움말 보기
-
-또는 "뉴스", "오늘의 뉴스" 등의 메시지를 보내주세요!
-            """
-            await update.message.reply_text(help_msg, parse_mode=ParseMode.MARKDOWN)
+            await self.start_command(update, context)
             
     def run_bot(self):
         """봇 실행"""
         logger.info("텔레그램 봇을 시작합니다...")
         
-        # 애플리케이션 생성
         self.application = Application.builder().token(self.token).build()
         
-        # 핸들러 등록
         self.application.add_handler(CommandHandler("start", self.start_command))
+        self.application.add_handler(CommandHandler("setting", self.setting_command))
         self.application.add_handler(CommandHandler("news", self.news_command))
         self.application.add_handler(CommandHandler("msg", self.msg_command))
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
         
-        # 봇 실행
         logger.info("봇이 시작되었습니다. Ctrl+C로 종료할 수 있습니다.")
         self.application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 def main():
-    # 봇 토큰 설정 (환경변수)
     import os
     
     BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-    GEMINI_API_KEY = os.getenv('GEMINI_API_KEY') # Gemini API 키 추가
+    GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+    GOOGLE_CREDENTIALS_FILE = os.getenv('GOOGLE_CREDENTIALS_FILE', 'google_credentials.json')
+    GOOGLE_SHEET_NAME = os.getenv('GOOGLE_SHEET_NAME', 'Gemini Bot Logs')
     
     if not BOT_TOKEN or not GEMINI_API_KEY:
         logger.error("TELEGRAM_BOT_TOKEN 또는 GEMINI_API_KEY가 설정되지 않았습니다.")
         return
 
-    # 봇 실행
-    bot = TelegramNewsBot(BOT_TOKEN)
+    # Google Sheets 로거 초기화
+    sheet_logger = GoogleSheetLogger(GOOGLE_CREDENTIALS_FILE, GOOGLE_SHEET_NAME)
+
+    bot = TelegramNewsBot(BOT_TOKEN, sheet_logger)
     try:
         bot.run_bot()
     except KeyboardInterrupt:

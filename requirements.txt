@@ -1,2 +1,4 @@
 selenium
 python-telegram-bot
+gspread
+google-auth-oauthlib
