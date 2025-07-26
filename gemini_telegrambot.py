@@ -172,7 +172,7 @@ class GeminiNewsScraper:
             
     def save_to_json(self, response_text, prompt="오늘의 주요 뉴스 알려줘", filename=None):
         """응답을 JSON 파일로 저장"""
-        if filename === None:
+        if filename == None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             prefix = "gemini_news" if "뉴스" in prompt else "gemini_response"
             filename = f"{prefix}_{timestamp}.json"
